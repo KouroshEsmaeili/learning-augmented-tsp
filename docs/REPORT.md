@@ -1,209 +1,366 @@
-# Technical Report: Learning-Augmented Euclidean TSP
+# Experimental Report: Learning-Augmented Euclidean TSP
 
 ## 1. Scope and research question
 
-This framework studies how exact optimization, classical heuristics, supervised
-signals, and online adaptation interact on the symmetric Euclidean traveling
-salesperson problem (TSP). Its purpose is controlled experimentation and clear
-implementation. No empirical result is embedded in this report; results must be
-generated from a recorded command and code revision.
+This project studies how exact optimization, classical heuristics, a supervised
+edge signal, and online algorithm selection interact on the symmetric Euclidean
+traveling salesperson problem (TSP). The primary question is whether a compact
+learned edge score trained on small exact instances can improve constructive
+decisions or complement 2-opt on held-out instances.
 
-The central experimental question is whether a learned edge signal, trained on
-small exact instances, can improve constructive decisions or complement 2-opt
-on held-out Euclidean instances. A separate online experiment asks whether an
-expert-weighting rule can adapt among fixed algorithms as instances arrive.
+The study is deliberately modest. It evaluates one synthetic distribution, one
+learned architecture, and predeclared seed sets. It does not establish a novel
+algorithm, broad generalization, or state-of-the-art performance.
 
 ## 2. Problem formulation
 
-An instance contains points \(V=\{0,\ldots,n-1\}\) with coordinates
-\(x_i\in\mathbb{R}^2\). The complete undirected graph has edge costs
+An instance contains points $V=\{0,\ldots,n-1\}$ with coordinates
+$x_i\in\mathbb{R}^2$. The complete undirected graph has symmetric costs:
 
-\[
-d_{ij}=\|x_i-x_j\|_2=d_{ji}.
-\]
+```math
+d_{ij}=\lVert x_i-x_j\rVert_2=d_{ji}.
+```
 
-For a permutation \(\pi\), the framework minimizes the closed-tour length
+For a permutation $\pi$, the objective is the closed-tour length:
 
-\[
+```math
 L(\pi)=\sum_{k=0}^{n-1}d_{\pi_k,\pi_{(k+1)\bmod n}}.
-\]
+```
 
-The stored tour lists each vertex once. The final return to \(\pi_0\) is
-implicit. This convention is validated at module boundaries.
+The stored tour lists every vertex exactly once. The return from the final vertex
+to $\pi_0$ is implicit and is included whenever length is measured.
 
-## 3. Exact reference: Held--Karp
+## 3. Algorithms
 
-Fix a start vertex \(s\). For \(S\subseteq V\setminus\{s\}\) and \(j\in S\),
-define
+### 3.1 Held–Karp exact dynamic programming
 
-\[
-C(S,j)=\min\{\text{cost of a path from }s\text{ through exactly }S
-\text{ and ending at }j\}.
-\]
+Fix a start vertex $s$. For $S\subseteq V\setminus\{s\}$ and $j\in S$, define
+$C(S,j)$ as the minimum cost of a path from $s$ through exactly $S$ and ending
+at $j$. The base case is:
 
-The base case and recurrence are
+```math
+C(\{j\},j)=d_{sj}.
+```
 
-\[
-C(\{j\},j)=d_{sj},
-\qquad
+The recurrence is:
+
+```math
 C(S,j)=\min_{i\in S\setminus\{j\}}
 \left[C(S\setminus\{j\},i)+d_{ij}\right].
-\]
+```
 
-The optimum is
+The optimal closed-tour cost is:
 
-\[
+```math
 L^*=\min_{j\ne s}\left[C(V\setminus\{s\},j)+d_{js}\right].
-\]
+```
 
-Predecessors stored during the recurrence reconstruct an optimal permutation.
-The method uses \(O(n^2 2^n)\) time and \(O(n2^n)\) space. The implementation
-therefore has a configurable maximum size and raises an error beyond it. It is
-a source of ground truth and training labels, not a scalable solver.
+Stored predecessors reconstruct an optimal permutation. The implementation uses
+$O(n^2 2^n)$ time and $O(n2^n)$ space and is therefore restricted to small
+instances. Here it supplies ground truth and training labels through 12 cities.
 
-## 4. Classical baselines
-
-### 4.1 Nearest neighbor
+### 3.2 Nearest neighbor
 
 From a chosen start, nearest neighbor repeatedly appends the closest unvisited
-city. Equal distances are broken by city index, making the solver deterministic.
-An optional variant evaluates every starting city and keeps the shortest tour.
-Its construction takes \(O(n^2)\) time with the dense distance matrix.
+city. Equal distances are broken by city index, making the construction
+deterministic. An optional expert checks every starting city and returns the
+shortest resulting tour. Dense-distance construction takes $O(n^2)$ time.
 
-Nearest neighbor is fast and interpretable but makes irrevocable local choices.
-It has no optimality claim here.
+### 3.3 2-opt
 
-### 4.2 2-opt
+Given tour edges $(a,b)$ and $(c,d)$, a 2-opt move removes them, reverses the
+segment from $b$ through $c$, and inserts $(a,c)$ and $(b,d)$. Its local change is:
 
-Given tour edges \((a,b)\) and \((c,d)\), a 2-opt move removes them and reverses
-the segment between \(b\) and \(c\), producing edges \((a,c)\) and \((b,d)\).
-The cost change is
-
-\[
+```math
 \Delta=d_{ac}+d_{bd}-d_{ab}-d_{cd}.
-\]
+```
 
-The implementation accepts a move only when \(\Delta\) is below a numerical
-tolerance, uses first improvement, and repeats passes until no improving move
-remains. It verifies the returned tour is no worse than the initial tour. The
-primary classical pipeline is nearest-neighbor construction followed by 2-opt.
+The implementation accepts a move only when $\Delta$ is below a numerical
+tolerance, uses first improvement, and repeats until no improving move remains.
+The returned length is checked against the initial solver result.
 
-## 5. Supervised edge-scoring heuristic
+### 3.4 Learned edge scoring
 
-### 5.1 Labels and features
-
-Training instances are solved exactly. Every undirected pair receives label 1
-when it occurs in the optimal cycle and 0 otherwise. The five pair features are:
+Each training instance is solved exactly. An undirected pair receives label 1 if
+it occurs in the optimal cycle and 0 otherwise. Five features describe a pair:
 
 1. absolute horizontal coordinate difference;
 2. absolute vertical coordinate difference;
-3. Euclidean pair distance;
-4. the smaller endpoint radius from the instance centroid;
-5. the larger endpoint radius from the instance centroid.
+3. Euclidean separation;
+4. smaller endpoint radius from the instance centroid;
+5. larger endpoint radius from the instance centroid.
 
 Coordinates are centered and divided by the root-mean-square radius. The
-features are consequently invariant to translation and uniform scaling, and
-sorting endpoint radii preserves undirected symmetry.
-
-### 5.2 Model and training
+features are invariant to translation and uniform scaling, and sorting endpoint
+radii preserves undirected symmetry.
 
 A two-hidden-layer multilayer perceptron produces one edge logit. Training uses
-weighted binary cross-entropy and Adam in a deterministic, full-batch CPU loop.
-Positive weighting addresses the imbalance between \(n\) tour edges and
-\(n(n-1)/2\) possible edges. The architecture is intentionally small so the
-experiment focuses on the value and limitations of the signal.
+weighted binary cross-entropy and Adam in a deterministic full-batch CPU loop.
+At inference, the decoder repeatedly chooses the unvisited city with the highest
+logit, with Euclidean distance and city index as tie breakers. The reported
+learned baseline applies the same 2-opt post-processing as the classical
+pipeline.
 
-### 5.3 Decoding and leakage control
+Training and evaluation are separate operations. Saved artifacts record training
+instance names, and the solver rejects known overlap. The training and evaluation
+seed sets below are also disjoint.
 
-Starting from a chosen city, the decoder repeatedly chooses the unvisited city
-with the highest predicted edge logit. Ties fall back to Euclidean distance and
-city index. Optional 2-opt separates the learned construction from classical
-post-processing in result metadata.
+### 3.5 Hedge algorithm selection
 
-Training and evaluation are separate CLI operations. Model artifacts record
-training-instance names, and the learned solver rejects any generated instance
-whose name appears in that set. Experimental protocols must also use disjoint
-seed sets, as shown in the README.
+Each expert is a complete TSP solver. On round $t$, all expert tour lengths are
+observed, so the feedback setting is full information. Costs are normalized
+within the round:
 
-This model estimates edge utility; it neither represents the complete tour
-state nor guarantees feasibility before decoding. Feasibility comes from the
-decoder, and optimality is never claimed.
-
-## 6. Online algorithm selection with Hedge
-
-A round is one newly observed TSP instance. Each expert is a complete TSP
-solver. Before observing round costs, the selector chooses the expert with the
-largest current probability, using declaration order for ties. It then runs all
-experts, so the feedback model is full information.
-
-For costs \(L_{t,i}\), the bounded round loss is
-
-\[
-\ell_{t,i}=\begin{cases}
-0, & \max_jL_{t,j}=\min_jL_{t,j},\\
-\dfrac{L_{t,i}-\min_jL_{t,j}}{\max_jL_{t,j}-\min_jL_{t,j}}, & \text{otherwise}.
+```math
+\ell_{t,i}=
+\begin{cases}
+0, & \max_j L_{t,j}=\min_j L_{t,j},\\
+\dfrac{L_{t,i}-\min_j L_{t,j}}
+{\max_j L_{t,j}-\min_j L_{t,j}}, & \text{otherwise}.
 \end{cases}
-\]
+```
 
-With learning rate \(\eta>0\), Hedge updates
+With learning rate $\eta>0$, weights and probabilities update as:
 
-\[
+```math
 w_{t+1,i}=w_{t,i}\exp(-\eta\ell_{t,i}),
 \qquad
-p_{t+1,i}=\frac{w_{t+1,i}}{\sum_j w_{t+1,j}}.
-\]
+p_{t+1,i}=\frac{w_{t+1,i}}{\sum_jw_{t+1,j}}.
+```
 
-The learned state is a distribution over algorithms, reflecting their observed
-relative performance. The implementation follows the multiplicative-weights
-idea; this project does not claim a new regret theorem for the chosen
-instance-dependent normalization or deterministic action rule.
+The selected expert is the current maximum-probability expert, with declaration
+order breaking ties. This deterministic action rule and the per-instance loss
+normalization differ from a sampled textbook presentation, so no new regret
+claim is made.
 
-## 7. Experimental protocol and metrics
+## 4. Experimental protocol
 
-Uniform instances use NumPy's modern generator in \([0,1)^2\). A benchmark is
-the Cartesian product of requested sizes and seeds. All solvers receive the
-same instance object. Records contain size, seed, identifier, solver, tour
-length, runtime, exact optimum when available, and
+### 4.1 Instance generation
 
-\[
+All instances use `numpy.random.default_rng(seed)` to draw coordinates uniformly
+from $[0,1)^2$. Every solver in a benchmark receives the same immutable instance.
+
+### 4.2 Classical benchmark
+
+- Sizes: 5, 8, 10, 12, 20, 50, 100.
+- Seeds: 0–19.
+- Solvers: Held–Karp where eligible, nearest neighbor, nearest neighbor + 2-opt.
+- Exact threshold: 12 cities.
+- Raw records: 360.
+
+The planned setup ran without adjustment.
+
+### 4.3 Model training
+
+- Sizes: 5, 6, 7, 8, 9.
+- Instance seeds: 100–109, producing 50 training instances.
+- Epochs: 150.
+- Training seed: 42.
+- Learning rate: 0.01.
+- Hidden dimension: 32 units per hidden layer.
+- Final weighted training loss: 0.573256.
+- Device: CPU.
+
+The seed set and hyperparameters were fixed before evaluation and were not
+changed after observing held-out results.
+
+### 4.4 Learned-method evaluation
+
+- Sizes: 6, 8, 10, 12, 20, 50.
+- Seeds: 200–219.
+- Solvers: Held–Karp where eligible, nearest neighbor, nearest neighbor + 2-opt,
+  learned edge + 2-opt.
+- Exact threshold: 12 cities.
+- Raw records: 440.
+
+Training and evaluation seeds have an empty intersection.
+
+### 4.5 Online evaluation
+
+- Size: 20 cities.
+- Seeds and round order: 300–319.
+- Experts: nearest neighbor, best-start nearest neighbor, nearest neighbor +
+  2-opt.
+- Learning rate: 0.5.
+- Rounds: 20.
+
+### 4.6 Metrics and summaries
+
+When an exact reference is available, relative optimality gap is:
+
+```math
 \operatorname{gap}(L,L^*)=\frac{L-L^*}{L^*}.
-\]
+```
 
-The gap is absent when no exact result exists. A negative gap beyond tolerance
-is treated as inconsistent data. Solver-reported lengths are independently
-recomputed from their tours before a record is accepted.
+No gap is reported above the exact threshold. Solver-reported lengths are
+independently recomputed from their tours before benchmark records are accepted.
+Summaries group by city count and solver and report counts, means, medians, and
+population standard deviations. The figures use population-standard-deviation
+error bars across the 20 fixed seeds.
 
-A defensible learned-method study should predeclare disjoint training and test
-seeds, report distributions rather than a single favorable instance, compare
-both constructive and post-2-opt variants, and record hardware and software
-versions. Runtime plots use a logarithmic axis; gap plots aggregate means by
-size. Raw CSV should accompany any later interpretation.
+Runtime is wall-clock time and includes Python implementation effects. It is not
+a hardware-independent complexity measurement.
 
-## 8. Verification strategy
+## 5. Results
 
-Tests cover geometric calculations, route invariants, seeded generation,
-heuristic determinism, non-worsening 2-opt behavior, common solver conformance,
-CSV semantics, online updates, feature invariance, training reproducibility,
-and train/test overlap rejection. Held--Karp is compared with exhaustive
-permutation search on independent tiny instances.
+### 5.1 Classical baselines
 
-Static checks use Ruff and strict mypy. CI runs on Python 3.12 and requires no
-GPU. Coverage is diagnostic: missing important branches should guide tests,
-while the project does not optimize for an arbitrary percentage.
+| Cities | Nearest-neighbor mean gap | NN + 2-opt mean gap |
+|---:|---:|---:|
+| 5 | 4.037% | 0.035% |
+| 8 | 10.358% | 0.460% |
+| 10 | 12.526% | 0.376% |
+| 12 | 12.706% | 0.673% |
 
-## 9. Limitations
+Across these four equally sampled sizes, the average of the per-size mean gaps
+was 9.91% for nearest neighbor and 0.39% after 2-opt. Thus 2-opt consistently
+improved this constructive baseline on the measured exact-reference instances.
 
-- Dense distances require \(O(n^2)\) memory.
-- Held--Karp and exact-label generation scale exponentially.
-- The learned model sees pair geometry rather than the partial-tour state.
-- Greedy decoding can create globally poor choices even with useful edge scores.
-- Synthetic uniform instances do not represent all Euclidean distributions.
-- Benchmark runtimes include Python implementation effects and machine noise.
-- Full-information Hedge pays the cost of running every expert each round.
+![Mean optimality gap with population-standard-deviation bars](assets/optimality-gap.png)
 
-These limits motivate later work on stronger baselines, broader distributions,
-calibrated evaluation, learned state-aware decisions, and bandit-feedback
-selection. Such work should be reported only after reproducible measurement.
+### 5.2 Learned solver
+
+| Cities | NN mean gap | NN + 2-opt mean gap | Learned + 2-opt mean gap |
+|---:|---:|---:|---:|
+| 6 | 5.811% | 0.000% | 0.000% |
+| 8 | 9.350% | 0.400% | 0.439% |
+| 10 | 8.478% | 0.574% | 0.778% |
+| 12 | 10.234% | 1.732% | 0.537% |
+
+The learned pipeline did not dominate the classical post-processed baseline. It
+was slightly worse at 8 and 10 cities, better at 12 cities, and equivalent to
+displayed precision at 6 cities. Across the four equally sampled exact sizes,
+the mean of per-size mean gaps was approximately 0.44% for learned + 2-opt and
+0.68% for nearest neighbor + 2-opt; that aggregate advantage is driven largely
+by the 12-city condition and should not be read as broad superiority.
+
+At sizes without exact references, learned + 2-opt improved substantially over
+plain nearest neighbor but was worse than nearest neighbor + 2-opt: mean tour
+length was 1.72% higher at 20 cities and 2.24% higher at 50 cities. The current
+pairwise features therefore did not provide a consistent improvement over the
+stronger classical pipeline.
+
+![Paired tour-length change relative to nearest neighbor](assets/learned-vs-classical.png)
+
+### 5.3 Runtime scaling
+
+Selected mean wall-clock runtimes were:
+
+| Solver | 5 cities | 12 cities | 50 cities | 100 cities |
+|:---|---:|---:|---:|---:|
+| Held–Karp | 0.133 ms | 32.805 ms | — | — |
+| Nearest neighbor | 0.061 ms | 0.101 ms | 0.612 ms | 1.873 ms |
+| Nearest neighbor + 2-opt | 0.131 ms | 0.295 ms | 9.724 ms | 58.319 ms |
+
+Held–Karp runtime increased by about 247 times from 5 to 12 cities in this
+implementation. This illustrates the expected exponential trend but is not a
+formal empirical complexity estimate. The heuristic runs extend to 100 cities;
+2-opt pays additional local-search cost for shorter tours.
+
+![Mean runtime on a logarithmic axis](assets/runtime-scaling.png)
+
+### 5.4 Online Hedge behavior
+
+| Expert | Selected rounds | Mean loss | Cumulative loss | Final probability |
+|:---|---:|---:|---:|---:|
+| Nearest neighbor | 1 | 1.000 | 20.000 | 0.010% |
+| Best-start nearest neighbor | 0 | 0.312 | 6.231 | 9.925% |
+| Nearest neighbor + 2-opt | 19 | 0.091 | 1.820 | 90.064% |
+
+The selector began uniformly, chose ordinary nearest neighbor on the tie-broken
+first round, and then selected nearest neighbor + 2-opt for the remaining 19
+rounds. Its posterior concentrated on that expert while retaining some mass on
+best-start nearest neighbor. Because every expert was executed on every round,
+this result concerns full-information adaptation rather than computational
+savings from selective execution.
+
+![Hedge expert probabilities after each round](assets/hedge-adaptation.png)
+
+### 5.5 Representative tour
+
+The figure below uses the first held-out 10-city evaluation instance
+(`uniform-n10-seed200`), chosen by protocol position rather than outcome. It is
+an illustration, not aggregate evidence. On this instance, both post-processed
+methods reached the exact length while the constructive nearest-neighbor tour
+was longer.
+
+![Representative exact, classical, and learned tours](assets/tour-comparison.png)
+
+## 6. Interpretation
+
+### Measured result
+
+2-opt provided the clearest and most consistent improvement. The learned edge
+score was competitive after the same post-processing but did not consistently
+beat it. Hedge rapidly favored the expert with the lowest cumulative normalized
+loss on the chosen sequence.
+
+### Possible interpretation
+
+The local symmetric pair features may contain useful geometric information but
+omit the partial-tour state and global constraints needed for consistently
+better construction. The 2-opt stage can also erase many differences between
+constructive policies. These are plausible explanations, not causal conclusions;
+isolating them requires ablations, multiple train/test splits, and additional
+instance distributions.
+
+## 7. Threats to validity
+
+- **Synthetic distribution:** all points are uniform in the unit square; clustered,
+  structured, and real benchmark instances may behave differently.
+- **Limited training sizes:** exact labels restrict supervised training to small
+  TSPs, while evaluation extends beyond the training range.
+- **Single architecture:** one small multilayer perceptron and one feature set were
+  tested; no architecture-level conclusion follows.
+- **Limited hyperparameter exploration:** the reported configuration was not
+  compared with a systematic search.
+- **Sample count:** twenty seeds per condition support descriptive summaries but
+  not a claim of statistical significance or broad generalization.
+- **No external corpus:** TSPLIB and other established benchmark collections were
+  not evaluated.
+- **Feature locality:** pair geometry does not encode the current partial tour or
+  global feasibility structure.
+- **Runtime environment:** timings depend on Python, libraries, operating system,
+  background load, and hardware. Very short timings are especially noisy.
+- **Post-processing interaction:** using 2-opt for both learned and classical
+  constructions can compress differences between the initial tours.
+- **Online feedback:** Hedge evaluates all experts and uses within-round normalized
+  losses, so the result is not a bandit-feedback or compute-saving experiment.
+
+## 8. Reproducibility
+
+The experiments used:
+
+- base Git revision `b4c2119f6f8fcff9099d54635168d2d8e797b330`;
+- Python 3.12.3;
+- NumPy 2.5.3;
+- PyTorch 2.14.0+cu130 with CUDA unavailable;
+- CPU-only execution on x86-64 Linux under WSL2.
+
+Experiment and reporting code was modified in the working tree after the base
+revision; the final review should commit those changes together. Exact commands
+are recorded in the README. Raw benchmarks and the model remain in ignored
+`artifacts/`, while compact summaries in `docs/results/` and selected figures in
+`docs/assets/` are intended for version control.
+
+## 9. Verification strategy
+
+Tests cover domain validation, deterministic generation, Held–Karp against
+exhaustive search, cyclic 2-opt behavior, solver result validation, benchmark and
+summary CSV semantics, training reproducibility, artifact loading, overlap
+rejection, online probability updates, and CLI workflows. Static checks use Ruff
+and strict mypy; CI runs on Python 3.12 without a GPU.
+
+Coverage is diagnostic rather than a target: new tests are selected for behavioral
+value, not solely to increase a percentage.
+
+## 10. Limitations and future work
+
+Promising extensions include repeated train/test splits, clustered and TSPLIB
+instances, stronger constructive baselines, feature ablations, calibrated
+uncertainty, state-aware neural policies, and partial-information online
+selection. Those extensions should be evaluated with predeclared protocols and
+reported only after reproducible measurement.
 
 ## References
 

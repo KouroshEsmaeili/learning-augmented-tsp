@@ -1,10 +1,17 @@
 """Tests for the online Hedge expert selector."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from tsp_learning.experiments import (
+    read_online_csv,
+    run_online_experiment,
+    summarize_online,
+    write_online_csv,
+)
 from tsp_learning.online import HedgeSelector
 from tsp_learning.problem import TSPInstance
 from tsp_learning.result import SolveResult
@@ -68,3 +75,24 @@ def test_hedge_validates_losses() -> None:
         selector.update({"a": 0.0})
     with pytest.raises(ValueError):
         selector.update({"a": -0.1, "b": 0.0})
+
+
+def test_online_experiment_records_and_summarizes_rounds(tmp_path: Path) -> None:
+    records = run_online_experiment(
+        (FixedTourSolver("forward", (0, 1)), FixedTourSolver("reverse", (1, 0))),
+        n_cities=2,
+        seeds=(10, 11),
+        learning_rate=0.5,
+    )
+
+    assert len(records) == 4
+    assert {record.seed for record in records} == {10, 11}
+    assert all(record.loss == 0.0 for record in records)
+    output = write_online_csv(records, tmp_path / "online.csv")
+    assert read_online_csv(output) == records
+
+    summaries = summarize_online(records)
+    assert [summary.expert for summary in summaries] == ["forward", "reverse"]
+    assert summaries[0].selected_rounds == 2
+    assert summaries[1].selected_rounds == 0
+    assert all(summary.final_probability == pytest.approx(0.5) for summary in summaries)
