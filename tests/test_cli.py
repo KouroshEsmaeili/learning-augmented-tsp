@@ -36,3 +36,28 @@ def test_benchmark_command_writes_csv(
     ) == 0
     assert output.exists()
     assert "wrote 6 records" in capsys.readouterr().out
+
+
+def test_summarize_command_writes_aggregate_csv(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    benchmark = tmp_path / "benchmark.csv"
+    summary = tmp_path / "summary.csv"
+    assert main(
+        [
+            "benchmark",
+            "--sizes",
+            "4",
+            "--seeds",
+            "1,2",
+            "--exact-max-cities",
+            "4",
+            "--output",
+            str(benchmark),
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    assert main(["summarize", "--input", str(benchmark), "--output", str(summary)]) == 0
+    assert summary.exists()
+    assert "wrote 3 summary rows" in capsys.readouterr().out
